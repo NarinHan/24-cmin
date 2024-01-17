@@ -14,62 +14,23 @@ int ctop[2] ;
 
 pid_t child ;
 
-char *crash ;
-char *error_message ;
-char *output_filename ;
-char *target_filepath ;
+char *message = "AddressSanitizer: heap-buffer-overflow" ;
+char *output_filename = "reduced" ;
 
-char buf[MAX] ;
-size_t read_len ;
+char *crash = "testsrc/jsmn/testcases/crash.json" ;
+char *target_filepath = "testsrc/jsmn/jsondump" ;
 
-char tm[MAX] ;
-size_t tm_len ;
+// char *crash = "testsrc/balance/testcases/fail" ;
+// char *target_filepath = "testsrc/balance/balance" ;
+
+// char *crash = "testsrc/libpng/crash.png" ;
+// char *target_filepath = "testsrc/libpng/libpng/test_pngfix" ;
 
 void 
 sigalrm_handler(int signum) 
 {
     printf("SIGALRM received...\n") ;
     kill(child, SIGKILL) ;
-}
-
-void
-parse_option(int argc, char *argv[])
-{
-    int opt ;
-    while ((opt = getopt(argc, argv, "i:m:o:")) != -1) {
-        switch (opt) {
-            case 'i':
-                crash = optarg ;
-                break ;
-            case 'm':
-                error_message = optarg ;
-                break ;
-            case 'o':
-                output_filename = optarg ;
-                break ;
-            case '?':
-                if (optopt == 'i' || optopt == 'm' || optopt == 'o') {
-                    fprintf(stderr, "Option -%c requires an argument.\n", optopt);
-                } else {
-                    fprintf(stderr, "Unknown option: -%c\n", optopt);
-                }
-                exit(EXIT_FAILURE) ;
-        }
-    }
-    
-    // Check if there is an additional argument (target file path)
-    if (optind < argc) {
-        target_filepath = argv[optind] ;
-    } else {
-        fprintf(stderr, "Missing target file path...\n") ; 
-        exit(EXIT_FAILURE) ;
-    }
-
-    if (crash == NULL || error_message == NULL || output_filename == NULL || target_filepath == NULL) {
-        fprintf(stderr, "Missing required options...\n") ;
-        exit(EXIT_FAILURE) ;
-    }
-
 }
 
 void
@@ -83,20 +44,18 @@ child_proc()
     close(ctop[0]) ; // close unused read end
     dup2(ctop[1], STDERR_FILENO) ; // redirect stderr to the write end
 
-    close(STDOUT_FILENO) ;
-
     // execute the target program
     execl(target_filepath, target_filepath, NULL) ;
     perror("executing target program error : ") ; // execl only returns on error
     exit(EXIT_FAILURE) ;
 }
 
-int
-parent_proc(char *tosend, size_t tosend_len)
+void 
+send_data(char *buf, size_t read_len)
 {
     // send data
     close(ptoc[0]) ; // close unused read end
-    write(ptoc[1], tosend, tosend_len) ;
+    write(ptoc[1], buf, read_len) ;
     close(ptoc[1]) ;
 
     // timer
@@ -117,43 +76,40 @@ parent_proc(char *tosend, size_t tosend_len)
     if (WIFSIGNALED(status)) { 
         printf("Child process was killed because it executed for more than 3 seconds...\n") ;
     } else {
-        alarm(0) ; // turn off the alarm
+        alarm(0) ;
     }
+}
+
+void
+compare_error()
+{
+    char buf[MAX] ;
 
     // receive standard error
     close(ctop[1]) ; // close unused write end
-    
-    // memset(buf, sizeof(buf), 0) ;
-    size_t len ;
-    read_len = 0 ;
-    while ((len = read(ctop[0], buf+read_len, sizeof(buf)-read_len)) > 0) {
+    memset(buf, sizeof(buf), 0) ;
+    size_t len, read_len = 0 ;
+    while ((len = read(ctop[0], buf, sizeof(buf))) > 0) {
         read_len += len ;
-        printf("received stderr size %ld...\n", read_len) ;
-        // write(STDOUT_FILENO, buf, len) ;   
+        write(STDOUT_FILENO, buf, len) ;
     }
-    buf[read_len] = '\0';
     close(ctop[0]) ;
 
-    // compare error messages
-    if (strstr(buf, error_message) != NULL) {
-        fprintf(stderr, "buf : %s\n", buf) ;
-        fprintf(stderr, "error message argument : %s\n", error_message) ;
-        return 1 ; // indicate that error message is found
-    }
 
-    return 0 ;
+    printf("compare error function finished\n") ;
 }
 
 char *
 delta_debugging(char *input, size_t input_len) 
 {
+    char tm[MAX] ;
+    size_t tm_len ;
+
     memcpy(tm, input, input_len) ;
     tm_len = input_len ;
     tm[tm_len] = '\0' ;
 
-    fprintf(stderr, "tm : %s\n", tm) ;
-
-    // printf("%s", tm) ;
+    printf("%s", tm) ;
 
     size_t s = tm_len - 1 ;
     while (s > 0) {
@@ -161,14 +117,14 @@ delta_debugging(char *input, size_t input_len)
             char head[MAX], tail[MAX] ;
             size_t head_len, tail_len ;
             
-            head_len = i - 1 + 1 ; 
+            head_len = i - 1 + 1 ; // + 1 for \0
             printf("head length : %ld\n", head_len) ;
             memcpy(head, tm, head_len) ;
             head[head_len] = '\0' ;
             
             tail_len = tm_len - 1 - i - s + 1 ;
             printf("tail length : %ld\n", tail_len) ; 
-            memcpy(tail, tm + i + s, tail_len) ;
+            memcpy(tail, tm + i + s - 1, tail_len) ;
             tail[tail_len] = '\0' ;
            
             printf("head : %s\n", head) ;
@@ -180,16 +136,19 @@ delta_debugging(char *input, size_t input_len)
             memcpy(headtail, head, head_len) ;
             memcpy(headtail + head_len, tail, tail_len) ;
             headtail_len = head_len + tail_len ;
-            headtail[headtail_len] = '\0' ;
 
             printf("head+tail : %s\n", headtail) ;
+
+            // 만든 걸 stdin 으로 보내줘야 함
+            // stderr 로 받은 것 & 에러 메시지 비교 -> crash 확인
+            // 최종적으로 나온 결과물 저장 
 
             // pipe
             if (pipe(ptoc) == -1 || pipe(ctop) == -1) {
                 perror("pipe error : ") ;
                 exit(EXIT_FAILURE) ;
             }
-    
+
             if ((child = fork()) == -1) {
                 perror("fork error : ") ;
                 exit(EXIT_FAILURE) ;
@@ -198,11 +157,10 @@ delta_debugging(char *input, size_t input_len)
             if (child == 0) { // child process
                 child_proc() ;
             } else { // parent process
-                int ret = parent_proc(headtail, headtail_len) ;
-                if (ret == 1) {
-                    return delta_debugging(headtail, headtail_len) ;
-                }
+                send_data(headtail, headtail_len) ;
+                compare_error() ;
             }
+
         }
 
         for (int i = 0; i <= tm_len - s; i++) {
@@ -214,27 +172,9 @@ delta_debugging(char *input, size_t input_len)
             memcpy(mid, tm + i, mid_len) ;
             mid[mid_len] = '\0' ;
             printf("mid : %s\n", mid) ;
-
-            // pipe
-            if (pipe(ptoc) == -1 || pipe(ctop) == -1) {
-                perror("pipe error : ") ;
-                exit(EXIT_FAILURE) ;
-            }
-    
-            if ((child = fork()) == -1) {
-                perror("fork error : ") ;
-                exit(EXIT_FAILURE) ;
-            }
-
-            if (child == 0) { // child process
-                child_proc() ;
-            } else { // parent process
-                int ret = parent_proc(mid, mid_len) ;
-                if (ret == 1) {
-                    return delta_debugging(mid, mid_len) ;
-                }
-            }
         }
+        
+        break ;
         s-- ;
     }
 
@@ -242,34 +182,25 @@ delta_debugging(char *input, size_t input_len)
 }
 
 int
-main(int argc, char *argv[]) 
+main(int argc, char *argv[])
 {
-    if (argc != 8) {
-        fprintf(stderr, "%s -i [file path of the crashing input] -m [standard error message string] -o [file path to store the result] [target file path]\n", argv[0]) ;
-    }
-
-    parse_option(argc, argv) ;
-
-    // read crash file
     FILE *fp = fopen(crash, "rb") ;
     if (fp == NULL) {
         perror("opening crash file error : ") ;
         exit(EXIT_FAILURE) ;
     }
-    
-    size_t len ;
-    while ((len = fread(buf + read_len, 1, sizeof(buf), fp)) > 0) {
-        read_len += len ;
+
+    char buf[MAX] ;
+    size_t len, read_len = 0 ;
+
+    while (!feof(fp)) {
+        read_len += fread(buf + read_len, 1, sizeof(buf), fp) ;
     }
     buf[read_len] = '\0' ;
 
-    printf("read length : %ld\n", read_len) ;
+    delta_debugging(buf, read_len) ;
 
     fclose(fp) ;
-
-    // 결과 받기 
-    char *reduced = delta_debugging(buf, read_len) ;
-    printf("reduced input : %s\n", reduced) ;
 
     return 0 ;
 }

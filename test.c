@@ -5,6 +5,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <signal.h>
 
 // fork, pipe, dup2, exec 연습
 // parent -> child : pipe 로 받은 data 를 dup2 로 stdin 으로 전달 
@@ -14,18 +15,27 @@
 
 int ptoc[2] ;
 int ctop[2] ;
+
+pid_t child ;
+
+char *message = "AddressSanitizer: heap-buffer-overflow" ;
+char *output_filename = "reduced" ;
+
 // char *crash = "testsrc/jsmn/testcases/crash.json" ;
-// char *message = "AddressSanitizer: heap-buffer-overflow" ;
-// char *output_filename = "reduced" ;
 // char *target_filepath = "testsrc/jsmn/jsondump" ;
 
-char *crash = "testsrc/balance/testcases/fail" ;
-char *target_filepath = "testsrc/balance/balance" ;
+// char *crash = "testsrc/balance/testcases/fail" ;
+// char *target_filepath = "testsrc/balance/balance" ;
+
+char *crash = "../crash.png" ;
+char *target_filepath = "./test_pngfix" ;
 
 void 
 sigalrm_handler(int signum) 
 {
     // This function does nothing. It's only for catching the signal.
+    printf("SIGALRM received...\n") ;
+    kill(child, SIGKILL) ;
 }
 
 void
@@ -37,14 +47,7 @@ child_proc()
     
     // send standard error
     close(ctop[0]) ; // close unused read end
-    dup2(STDERR_FILENO, ctop[1]) ; // redirect stdout to the write end
-
-    // char recv[4096] ;
-    // int sz ;
-    // while ((sz = read(ptoc[0], &recv, sizeof(recv))) > 0) {
-    //     write(STDOUT_FILENO, &recv, sz) ;
-    // }
-    // close(ptoc[0]) ;
+    dup2(ctop[1], STDERR_FILENO) ; // redirect stderr to the write end
 
     // execute the target program
     execl(target_filepath, target_filepath, NULL) ;
@@ -64,19 +67,19 @@ main(int argc, char *argv[])
     char buf[4096] ;
     int sz, read_sz = 0 ;
     
-    int fd = open(crash, O_RDONLY) ;
-    if (fd == -1) {
+    // int fd = open(crash, O_RDONLY) ;
+    FILE *fp = fopen(crash, "rb") ;
+    if (fp == NULL) {
         perror("opening crash file error : ") ;
         exit(EXIT_FAILURE) ;
     }
     
-    while ((sz = read(fd, buf + read_sz, sizeof(buf))) > 0) {
+    while ((sz = fread(buf + read_sz, 1, sizeof(buf), fp)) > 0) {
         read_sz += sz ;
     }
     buf[read_sz] = '\0' ;
 
-    pid_t child = fork() ;
-    if (child == -1) {
+    if ((child = fork()) == -1) {
         perror("fork error : ") ;
         exit(EXIT_FAILURE) ;
     }
@@ -86,35 +89,49 @@ main(int argc, char *argv[])
     } else { // parent process
         // send data
         close(ptoc[0]) ; // close unused read end
-        write(ptoc[1], buf, strlen(buf)) ;
+        write(ptoc[1], buf, read_sz) ;
         close(ptoc[1]) ;
 
+        // timer
         signal(SIGALRM, sigalrm_handler) ; // set up a signal handler for SIGALRM
-        alarm(3) ; // set 3 sec alarm
+        if (alarm(3) != 0) { // set 3 sec alarm
+            perror("setting alarm error : ") ;
+            exit(EXIT_FAILURE) ;
+        }
 
         // wait for the child process to finish
         int status ;
         if (waitpid(child, &status, 0) == -1) {
             perror("waitpid error : ") ;
             exit(EXIT_FAILURE) ;
-        }
+        } 
 
         // if the child process was terminated by SIGALRM, kill it
-        if (WIFSIGNALED(status) && WTERMSIG(status) == SIGALRM) {
-            kill(child, SIGKILL) ;
-            printf("Child process was killed because it executed for more than 3 seconds.\n") ;
+        if (WIFSIGNALED(status)) { 
+            printf("Child process was killed because it executed for more than 3 seconds...\n") ;
+        } else {
+            alarm(0) ;
         }
 
         // receive standard error
         close(ctop[1]) ; // close unused write end
         memset(buf, sizeof(buf), 0) ;
-        while ((sz = read(ctop[0], buf, sizeof(buf)) > 0)) {
+        read_sz = 0 ;
+        while ((sz = read(ctop[0], buf, sizeof(buf))) > 0) {
+            read_sz += sz ;
+            printf("received stderr size %d....\n", read_sz) ;
             write(STDOUT_FILENO, buf, sz) ;
         }
         close(ctop[0]) ;
+
+        char *comp = strstr(buf, message) ;
+
+        if (comp) {
+            printf("message matching...\n") ;
+        }
     }
 
-    close(fd) ;
+    fclose(fp) ;
 
     return 0 ;
 }
