@@ -19,9 +19,6 @@ char *error_message ;
 char *output_filename ;
 char *target_filepath ;
 
-char buf[MAX] ;
-size_t read_len ;
-
 char tm[MAX] ;
 size_t tm_len ;
 
@@ -59,7 +56,9 @@ parse_option(int argc, char *argv[])
     
     // Check if there is an additional argument (target file path)
     if (optind < argc) {
-        target_filepath = argv[optind] ;
+        char *temp = argv[optind] ;
+        target_filepath = strtok(target_filepath, " ") ;
+        temp = temp[strlen(target_filepath)] ;
     } else {
         fprintf(stderr, "Missing target file path...\n") ; 
         exit(EXIT_FAILURE) ;
@@ -96,7 +95,10 @@ parent_proc(char *tosend, size_t tosend_len)
 {
     // send data
     close(ptoc[0]) ; // close unused read end
-    write(ptoc[1], tosend, tosend_len) ;
+    size_t len, write_len = 0 ;
+    while ((len = write(ptoc[1], tosend + write_len, tosend_len - write_len)) > 0) {
+        write_len += len ;
+    }
     close(ptoc[1]) ;
 
     // timer
@@ -123,11 +125,10 @@ parent_proc(char *tosend, size_t tosend_len)
     // receive standard error
     close(ctop[1]) ; // close unused write end
     
-    // memset(buf, sizeof(buf), 0) ;
-    size_t len ;
-    read_len = 0 ;
-    while ((len = read(ctop[0], buf+read_len, sizeof(buf)-read_len)) > 0) {
-        read_len += len ;
+    char buf[MAX] ;
+    size_t read_len = 0 ;
+    while ((len = read(ctop[0], buf + read_len, sizeof(buf) - read_len)) > 0) {
+        read_len += len ; 
         printf("received stderr size %ld...\n", read_len) ;
         // write(STDOUT_FILENO, buf, len) ;   
     }
@@ -136,8 +137,6 @@ parent_proc(char *tosend, size_t tosend_len)
 
     // compare error messages
     if (strstr(buf, error_message) != NULL) {
-        fprintf(stderr, "buf : %s\n", buf) ;
-        fprintf(stderr, "error message argument : %s\n", error_message) ;
         return 1 ; // indicate that error message is found
     }
 
@@ -145,7 +144,7 @@ parent_proc(char *tosend, size_t tosend_len)
 }
 
 char *
-delta_debugging(char *input, size_t input_len) 
+reduce(char *input, size_t input_len) 
 {
     memcpy(tm, input, input_len) ;
     tm_len = input_len ;
@@ -158,15 +157,14 @@ delta_debugging(char *input, size_t input_len)
     size_t s = tm_len - 1 ;
     while (s > 0) {
         for (int i = 0; i <= tm_len - s; i++) {
-            char head[MAX], tail[MAX] ;
-            size_t head_len, tail_len ;
-            
-            head_len = i - 1 + 1 ; 
+            size_t head_len = i - 1 + 1 ; 
+            char *head = (char *)malloc(head_len + 1) ;
             printf("head length : %ld\n", head_len) ;
             memcpy(head, tm, head_len) ;
             head[head_len] = '\0' ;
             
-            tail_len = tm_len - 1 - i - s + 1 ;
+            size_t tail_len = tm_len - 1 - i - s + 1 ;
+            char *tail = (char *)malloc(tail_len + 1) ;
             printf("tail length : %ld\n", tail_len) ; 
             memcpy(tail, tm + i + s, tail_len) ;
             tail[tail_len] = '\0' ;
@@ -174,15 +172,16 @@ delta_debugging(char *input, size_t input_len)
             printf("head : %s\n", head) ;
             printf("tail : %s\n", tail) ;
             
-            char headtail[MAX] ;
-            size_t headtail_len ;
-
+            size_t headtail_len = head_len + tail_len ;
+            char *headtail = (char *)malloc(headtail_len + 1) ;
             memcpy(headtail, head, head_len) ;
             memcpy(headtail + head_len, tail, tail_len) ;
-            headtail_len = head_len + tail_len ;
             headtail[headtail_len] = '\0' ;
 
-            printf("head+tail : %s\n", headtail) ;
+            printf("head + tail : %s\n", headtail) ;
+            
+            free(head) ;
+            free(tail) ;
 
             // pipe
             if (pipe(ptoc) == -1 || pipe(ctop) == -1) {
@@ -200,16 +199,16 @@ delta_debugging(char *input, size_t input_len)
             } else { // parent process
                 int ret = parent_proc(headtail, headtail_len) ;
                 if (ret == 1) {
-                    return delta_debugging(headtail, headtail_len) ;
+                    return reduce(headtail, headtail_len) ;
                 }
             }
+
+            free(headtail) ;
         }
 
         for (int i = 0; i <= tm_len - s; i++) {
-            char mid[MAX] ;
-            size_t mid_len ;
-
-            mid_len = i + s - 1 - i + 1 ;
+            size_t mid_len = i + s - 1 - i + 1 ;
+            char *mid = (char *)malloc(mid_len + 1) ;
             printf("mid length : %ld\n", mid_len) ;
             memcpy(mid, tm + i, mid_len) ;
             mid[mid_len] = '\0' ;
@@ -231,11 +230,14 @@ delta_debugging(char *input, size_t input_len)
             } else { // parent process
                 int ret = parent_proc(mid, mid_len) ;
                 if (ret == 1) {
-                    return delta_debugging(mid, mid_len) ;
+                    return reduce(mid, mid_len) ;
                 }
             }
+
+            free(mid) ;
         }
         s-- ;
+        printf("s: %ld\n", s) ; 
     }
 
     return tm ;
@@ -256,20 +258,28 @@ main(int argc, char *argv[])
         perror("opening crash file error : ") ;
         exit(EXIT_FAILURE) ;
     }
-    
-    size_t len ;
-    while ((len = fread(buf + read_len, 1, sizeof(buf), fp)) > 0) {
+
+    char buf[MAX] ; 
+    size_t len, read_len = 0 ;
+    while ((len = fread(buf + read_len, 1, sizeof(buf) - read_len, fp)) > 0) {
         read_len += len ;
     }
     buf[read_len] = '\0' ;
 
-    printf("read length : %ld\n", read_len) ;
-
     fclose(fp) ;
 
     // 결과 받기 
-    char *reduced = delta_debugging(buf, read_len) ;
+    char *reduced = reduce(buf, read_len) ;
+    reduced[strlen(reduced)] = '\0' ;
     printf("reduced input : %s\n", reduced) ;
+
+    fp = fopen(output_filename, "wb") ;
+    size_t write_len = 0 ;
+    while ((len = fwrite(reduced + write_len, 1, strlen(reduced) - write_len, fp)) > 0) {
+        write_len += len ;
+    }
+
+    fclose(fp) ;
 
     return 0 ;
 }
