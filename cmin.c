@@ -17,7 +17,7 @@ pid_t child ;
 char *crash ;
 char *error_message ;
 char *output_filename ;
-char *target_filepath ;
+char *target_filepath[10] ;
 
 char tm[MAX] ;
 size_t tm_len ;
@@ -57,8 +57,13 @@ parse_option(int argc, char *argv[])
     // Check if there is an additional argument (target file path)
     if (optind < argc) {
         char *temp = argv[optind] ;
-        target_filepath = strtok(target_filepath, " ") ;
-        temp = temp[strlen(target_filepath)] ;
+        char *token = strtok(temp, " ") ;
+        int i = 0 ;
+        while (token != NULL && i < 9) {
+            target_filepath[i++] = token ;
+            token = strtok(NULL, " ") ;
+        }
+        target_filepath[i] = NULL ;
     } else {
         fprintf(stderr, "Missing target file path...\n") ; 
         exit(EXIT_FAILURE) ;
@@ -82,10 +87,8 @@ child_proc()
     close(ctop[0]) ; // close unused read end
     dup2(ctop[1], STDERR_FILENO) ; // redirect stderr to the write end
 
-    close(STDOUT_FILENO) ;
-
     // execute the target program
-    execl(target_filepath, target_filepath, NULL) ;
+    execv(target_filepath[0], target_filepath) ;
     perror("executing target program error : ") ; // execl only returns on error
     exit(EXIT_FAILURE) ;
 }
@@ -151,8 +154,6 @@ reduce(char *input, size_t input_len)
     tm[tm_len] = '\0' ;
 
     fprintf(stderr, "tm : %s\n", tm) ;
-
-    // printf("%s", tm) ;
 
     size_t s = tm_len - 1 ;
     while (s > 0) {
